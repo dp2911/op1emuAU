@@ -1,0 +1,29 @@
+name: macOS
+
+on:
+  push:
+    branches: [macos-ci]
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: brew install llvm@15 cmake ninja
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR="$(brew --prefix llvm@15)/lib/cmake/llvm" \
+            -DOP1_BUILD_HEADLESS_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --target op1emu ldrdump op1-headless-test op1-time-source-test
+
+      - name: Test (synthetic LDR, no firmware)
+        run: ctest --test-dir build -R "headless-test|time-source-test|ldr-smoke" --output-on-failure
