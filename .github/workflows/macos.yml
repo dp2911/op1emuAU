@@ -1,0 +1,74 @@
+name: macOS
+
+on:
+  push:
+    branches: [macos-ci]
+  workflow_dispatch:
+
+jobs:
+  build-test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: brew install llvm@15 cmake ninja
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR="$(brew --prefix llvm@15)/lib/cmake/llvm" \
+            -DOP1_BUILD_HEADLESS_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --target op1emu ldrdump op1-headless-test op1-time-source-test
+
+      - name: Test (synthetic LDR, no firmware)
+        run: ctest --test-dir build -R "headless-test|time-source-test|ldr-smoke" --output-on-failure
+
+  package-app:
+    runs-on: macos-14
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: brew install llvm@15 cmake ninja dylibbundler
+
+      - name: Build GUI emulator
+        run: |
+          cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR="$(brew --prefix llvm@15)/lib/cmake/llvm"
+          cmake --build build --target op1emu
+
+      - name: Package (no firmware included)
+        run: |
+          set -euo pipefail
+          P=op1emu-macos-arm64
+          mkdir -p "$P/gui" "$P/libs"
+          cp build/op1emu "$P/"
+          cp gui/ui.json gui/ui.png "$P/gui/"
+          cat > "$P/run.command" <<'SH'
+          #!/bin/bash
+          # Usage: ./run.command /path/to/nandflash.img [/path/to/te-boot.ldr]
+          # Needs otp.bin (8192 bytes) in this folder; a synthetic one is created if missing.
+          cd "$(dirname "$0")"
+          [ -n "$1" ] || { echo "usage: ./run.command nand.img [te-boot.ldr]"; exit 1; }
+          exec ./op1emu "$@" --nand-snapshot
+          SH
+          chmod +x "$P/run.command" "$P/op1emu"
+          (cd "$P" && dylibbundler -od -b -x ./op1emu -d ./libs/ -p @executable_path/libs/)
+          codesign --force --sign - "$P"/libs/*.dylib "$P/op1emu"
+          otool -L "$P/op1emu"
+          if otool -L "$P/op1emu" | grep -q /opt/homebrew; then echo "unbundled homebrew dependency"; exit 1; fi
+          (cd "$P" && ./op1emu --help 2>&1 | head -5 || true)
+          zip -qr "$P.zip" "$P"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: op1emu-macos-arm64
+          path: op1emu-macos-arm64.zip
